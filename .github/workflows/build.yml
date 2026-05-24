@@ -1,0 +1,116 @@
+name: Build Patched iLO4 Firmware
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      patch_version:
+        description: '选择需要编译的固件版本 (Select patch version to build)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - '277'
+          - '277-tools'
+          - '277-memdump'
+          - '273'
+          - '250'
+          - '278'
+          - '279'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and Package Patched Firmware
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bullseye-slim
+
+    steps:
+      - name: Install System Dependencies
+        run: |
+          apt-get update
+          apt-get install -y python2-minimal curl wget git zip tar
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Python Pip and Virtualenv
+        run: |
+          curl https://bootstrap.pypa.io/pip/2.7/get-pip.py --output get-pip.py
+          python2 get-pip.py
+          rm get-pip.py
+          python2 -m pip install virtualenv
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Firmware Patches
+        run: |
+          # Set up Python virtual environment
+          python2 -m virtualenv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+          # Initialize the binaries (downloads the original HPE files)
+          ./build.sh init
+
+          # Determine which patch to build (defaults to 'all' if not manually specified)
+          PATCH_TO_BUILD="${{ github.event.inputs.patch_version }}"
+          if [ -z "$PATCH_TO_BUILD" ]; then
+            PATCH_TO_BUILD="all"
+          fi
+
+          if [ "$PATCH_TO_BUILD" = "all" ]; then
+            echo "=========================================="
+            echo "Building ALL configured patches"
+            echo "=========================================="
+            for patch_dir in patches/*; do
+              if [ -d "$patch_dir" ] && [ -f "$patch_dir/config" ]; then
+                patch_name=$(basename "$patch_dir")
+                echo "-> Building patch: $patch_name"
+                ./build.sh "$patch_name"
+              fi
+            done
+          else
+            echo "=========================================="
+            echo "Building SPECIFIC patch: $PATCH_TO_BUILD"
+            echo "=========================================="
+            ./build.sh "$PATCH_TO_BUILD"
+          fi
+
+          # Copy flashing utilities to build folder to make it completely self-contained
+          mkdir -p build/utilities
+          cp binaries/flash_ilo4 binaries/CP027911.xml build/utilities/
+          
+          # Create a summary ZIP of everything built for easy download
+          zip -r ilo4_patched_all.zip build/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ilo4-patched-firmware
+          path: |
+            build/*.bin.patched
+            build/utilities/
+            ilo4_patched_all.zip
+
+      - name: Create Release and Upload Assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/*.bin.patched
+            build/utilities/flash_ilo4
+            build/utilities/CP027911.xml
+            ilo4_patched_all.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
